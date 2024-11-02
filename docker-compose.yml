@@ -1,0 +1,141 @@
+x-def-logging: &default-logging
+  logging:
+    driver: "loki"
+    options:
+      loki-url: "http://localhost:3100/loki/api/v1/push"
+      loki-batch-size: "100"
+      loki-retries: 2
+      loki-max-backoff: 1000ms
+      loki-timeout: 1s
+
+services:
+  nginx:
+    container_name: nginx
+    image: nginx:latest
+    restart: on-failure
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.local.conf:/etc/nginx/conf.d/default.conf
+      - static_files:/app/var/static
+    <<: *default-logging
+    depends_on:
+      - web
+
+  web: &web
+    container_name: web
+    build:
+      context: ./main/
+      dockerfile: Dockerfile
+    restart: on-failure
+    environment:
+      - TZ=Asia/Almaty
+      - DB_HOST=postgres
+      - DB_HOST_2=postgres-slave
+    volumes:
+      - static_files:/app/var/static
+    <<: *default-logging
+    depends_on:
+      - postgres
+    deploy:
+      resources:
+        reservations:
+          cpus: '1'
+          memory: 100M
+        limits:
+          cpus: '2'
+          memory: 200M
+
+  web-2:
+    <<: *web
+    container_name: web-2
+
+  web-3:
+    <<: *web
+    container_name: web-3
+    ports:
+      - "8000:8000"
+
+  # createuser --replication -P repluser
+  postgres:
+    container_name: postgres
+    image: postgres:17.0-alpine3.20
+    restart: on-failure
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    <<: *default-logging
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgresql/master/postgres.conf:/var/lib/postgresql/data/postgres.conf
+      - ./postgresql/master/pg_hba.conf:/var/lib/postgresql/data/pg_hba.conf
+
+  # rm -r ~/data/*
+  # pg_basebackup --host=postgresql_01 --username=repluser --pgdata=/var/lib/postgresql/data --wal-method=stream --write-recovery-conf
+  postgres-slave:
+    container_name: postgres-slave
+    image: postgres:17.0-alpine3.20
+    restart: on-failure
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    <<: *default-logging
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_s_data:/var/lib/postgresql/data
+
+  grafana:
+    container_name: "grafana"
+    restart: unless-stopped
+    user: "0"
+    image: grafana/grafana-enterprise
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+    environment:
+      - TERM=linux
+      - GF_SERVER_ROOT_URL=http://my.grafana.server/
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-polystat-panel
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+      - TZ=Asia/Almaty
+
+  prometheus:
+    container_name: prometheus
+    image: prom/prometheus:v2.54.1
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+
+  loki:
+    hostname: loki
+    image: grafana/loki:latest
+    environment:
+      TZ: "Almaty/Asia"
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/retention-config.yaml
+    volumes:
+      - ./monitoring/loki/config.yaml:/etc/loki/retention-config.yaml
+
+volumes:
+  postgres_data:
+  postgres_s_data:
+  static_files:
+  prometheus_data:
+  grafana-data:
